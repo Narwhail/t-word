@@ -98,17 +98,17 @@ class RoadNetworkVisualizer:
 
         # --- Constants ---
         self.INITIAL_NODE_RADIUS = 7
+        self.NODE_DETECTION_RADIUS_BASE = 15 # In image pixels
         self.CONNECTION_COLOR = "#0000FF"
         self.NODE_COLOR = "#FF0000"
         self.HOUSE_NODE_COLOR = "#9932CC"
         self.BUBBLE_COLOR = "#00AEEF"
         
-        self.HAZARD_PALETTE = [
-            "#FFFF00",  # 1 bubble: Yellow
-            "#FFA500",  # 2 bubbles: Orange
-            "#FF0000",  # 3 bubbles: Red
-            "#8B0000"   # 4+ bubbles: Dark Red
-        ]
+        self.HAZARD_PALETTE = ["#FFFF00", "#FFA500", "#FF0000", "#8B0000"]
+        
+        # --- NEW: Centroid Visuals ---
+        self.CENTROID_OUTLINE_COLOR = "#FFFFFF" # Bright white
+        self.CENTROID_OUTLINE_WIDTH = 3
         
         self.ZOOM_STEP = 0.1
         self.MIN_ZOOM_SCALE = 0.01
@@ -129,6 +129,8 @@ class RoadNetworkVisualizer:
         tk.Button(self.control_frame, text="Clear All", command=self.clear_all).pack(side=tk.LEFT, padx=5, pady=2)
         tk.Button(self.control_frame, text="Circle Painter", command=self._activate_bubble_mode, bg="#ADD8E6").pack(side=tk.LEFT, padx=10, pady=2)
         tk.Button(self.control_frame, text="Clear Bubbles", command=self.clear_bubbles).pack(side=tk.LEFT, padx=5, pady=2)
+        # --- NEW: Centroid Mode Button ---
+        tk.Button(self.control_frame, text="Set Centroids", command=self._activate_centroid_mode, bg="#90EE90").pack(side=tk.LEFT, padx=10, pady=2)
 
         self.canvas = tk.Canvas(self.master, bg="lightgrey")
         self.canvas.pack(fill=tk.BOTH, expand=True)
@@ -145,6 +147,14 @@ class RoadNetworkVisualizer:
         self.canvas.bind("<Motion>", self._on_mouse_move)
         self.master.bind("<Escape>", self._on_escape_key)
 
+    # --- NEW: Method to enter Centroid Mode ---
+    def _activate_centroid_mode(self):
+        """Switches the application to centroid selection mode."""
+        self.mode = 'CENTROID'
+        self.is_drawing_bubble = False # Ensure bubble drawing is off
+        self.canvas.config(cursor="tcross")
+        self.update_status_bar()
+
     def _activate_bubble_mode(self):
         self.mode = 'BUBBLE'
         self.is_drawing_bubble = False
@@ -157,9 +167,12 @@ class RoadNetworkVisualizer:
                 message = "Load a network JSON file to start."
             elif self.mode == 'BUBBLE':
                 if self.is_drawing_bubble:
-                    message = "Move mouse to set radius, then click to finalize the bubble. Press ESC to cancel."
+                    message = "Move mouse to set radius, then click to finalize. Press ESC to cancel."
                 else:
-                    message = "BUBBLE MODE: Click to set the center of the bubble. Press ESC to return to View Mode."
+                    message = "BUBBLE MODE: Click to set the bubble center. Press ESC to return to View Mode."
+            # --- NEW: Status bar message for Centroid mode ---
+            elif self.mode == 'CENTROID':
+                message = "CENTROID MODE: Click a node to toggle its centroid status. Press ESC to return to View Mode."
             else: 
                 message = f"VIEW MODE | Zoom: {self.zoom_scale:.2f} | Nodes: {len(self.nodes)} | Right-click and drag to pan."
         self.status_bar.config(text=message)
@@ -173,28 +186,27 @@ class RoadNetworkVisualizer:
                                     outline=self.BUBBLE_COLOR, dash=(4, 4), width=2, tags="preview_bubble")
     
     def _on_escape_key(self, event):
-        if self.mode == 'BUBBLE':
-            if self.is_drawing_bubble:
-                self.is_drawing_bubble = False
-                self.canvas.delete("preview_bubble")
-                self.update_status_bar("Bubble creation cancelled. Click to set a new center.")
-            else:
-                self.mode = 'VIEW'
-                self.canvas.config(cursor="")
-                self.update_status_bar()
+        # --- MODIFIED: Handle escape for both BUBBLE and CENTROID modes ---
+        if self.mode == 'BUBBLE' and self.is_drawing_bubble:
+            self.is_drawing_bubble = False
+            self.canvas.delete("preview_bubble")
+            self.update_status_bar("Bubble creation cancelled.")
+        elif self.mode in ['BUBBLE', 'CENTROID']:
+            self.mode = 'VIEW'
+            self.canvas.config(cursor="")
+            self.update_status_bar()
 
     def _on_canvas_left_click(self, event):
+        # --- MODIFIED: Route click based on current mode ---
         if self.mode == 'BUBBLE':
             self._handle_bubble_mode_click(event)
+        elif self.mode == 'CENTROID':
+            self._handle_centroid_mode_click(event)
     
     def _handle_bubble_mode_click(self, event):
-        if not self.background_image_path:
-            messagebox.showinfo("Info", "Please load a network file first.")
-            return
-
+        if not self.background_image_path: return
         if not self.is_drawing_bubble:
-            self.bubble_center_x = event.x
-            self.bubble_center_y = event.y
+            self.bubble_center_x, self.bubble_center_y = event.x, event.y
             self.is_drawing_bubble = True
             self.update_status_bar()
         else:
@@ -209,71 +221,75 @@ class RoadNetworkVisualizer:
             self._full_redraw_canvas_elements()
             self.update_status_bar()
 
+    # --- NEW: Handles clicks in Centroid mode ---
+    def _handle_centroid_mode_click(self, event):
+        """Finds a node at the click location and toggles its centroid status."""
+        if not self.nodes or not self.quadtree: return
+        
+        clicked_node = self._get_node_at_coords(event.x, event.y)
+        
+        if clicked_node:
+            # Toggle the 'is_centroid' status. Use .get for safety with older data.
+            is_currently_centroid = clicked_node.get('is_centroid', False)
+            clicked_node['is_centroid'] = not is_currently_centroid
+            
+            # Redraw to show the visual change immediately
+            self._full_redraw_canvas_elements()
+
+    # --- NEW: Efficiently finds a node using the Quadtree ---
+    def _get_node_at_coords(self, canvas_x, canvas_y):
+        """Finds the closest node to a canvas click using the quadtree for efficiency."""
+        if self.zoom_scale == 0: return None
+        
+        # Define a search radius in image coordinates
+        detection_radius_img = self.NODE_DETECTION_RADIUS_BASE / self.zoom_scale
+        
+        # Center of the search area
+        image_x, image_y = self._canvas_to_image_coords(canvas_x, canvas_y)
+        
+        # Define a query box for the quadtree around the click
+        query_box = (
+            image_x - detection_radius_img,
+            image_y - detection_radius_img,
+            detection_radius_img * 2,
+            detection_radius_img * 2
+        )
+        
+        # Get candidate nodes from the quadtree (this is the fast part)
+        candidate_nodes = self.quadtree.query(query_box)
+        
+        # Find the closest node among the candidates
+        closest_node = None
+        min_dist_sq = (detection_radius_img ** 2)
+        
+        for node in candidate_nodes:
+            dist_sq = (node['x'] - image_x)**2 + (node['y'] - image_y)**2
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                closest_node = node
+                
+        return closest_node
+
     def _create_bubble(self, center_x, center_y, radius):
         new_bubble = {'center_x': center_x, 'center_y': center_y, 'radius': radius}
         self.bubbles.append(new_bubble)
-        print(f"Created bubble at ({center_x:.2f}, {center_y:.2f}) with radius {radius:.2f}.")
 
     def clear_bubbles(self):
-        if not self.bubbles:
-            messagebox.showinfo("Info", "There are no bubbles to clear.")
-            return
-        if messagebox.askyesno("Clear Bubbles", "Are you sure you want to delete all bubbles?"):
+        if not self.bubbles: return
+        if messagebox.askyesno("Clear Bubbles", "Delete all bubbles?"):
             self.bubbles.clear()
             self._update_node_bubble_containment()
             self._full_redraw_canvas_elements()
             self.update_status_bar("All bubbles cleared.")
 
-    # --- THIS IS THE FIX: The missing method is restored ---
-    def load_background_image_from_path(self, tile_dir_path):
-        """Loads and processes the tile directory to set up the map background."""
-        try:
-            level_dirs = [d for d in os.listdir(tile_dir_path) if d.isdigit()]
-            if not level_dirs:
-                messagebox.showerror("Error", "The specified directory does not contain level subfolders (e.g., '0', '1', ...).")
-                return
-            
-            self.image_pyramid.clear()
-            for level_str in level_dirs:
-                level = int(level_str)
-                level_path = os.path.join(tile_dir_path, level_str)
-                max_x, max_y = 0, 0
-                for tile_name in os.listdir(level_path):
-                    if tile_name.endswith('.png'):
-                        parts = os.path.splitext(tile_name)[0].split('_')
-                        if len(parts) == 2:
-                            max_x = max(max_x, int(parts[0]))
-                            max_y = max(max_y, int(parts[1]))
-                self.image_pyramid[level] = (max_x + self.tile_size, max_y + self.tile_size)
-        except Exception as e:
-            messagebox.showerror("Load Error", f"Could not process the tile directory: {e}")
-            return
-
-        self.tile_dir = tile_dir_path
-        self.background_image_path = tile_dir_path
-        if 0 in self.image_pyramid:
-             self.bg_image_width, self.bg_image_height = self.image_pyramid[0]
-        else:
-             messagebox.showerror("Error", "Could not find base level '0' in the tile directory.")
-             return
-        
-        self.update_status_bar("Image tiles loaded.")
-    
     def _update_node_bubble_containment(self):
-        if not self.bubbles:
-            for node in self.nodes.values():
-                node['bubble_count'] = 0
-            return
-
         for node in self.nodes.values():
-            if not node.get('is_house', False):
-                node['bubble_count'] = 0
-                continue
+            node['bubble_count'] = 0 # Reset all first
+            if not node.get('is_house', False): continue
             
             count = 0
             for bubble in self.bubbles:
-                dist_sq = (node['x'] - bubble['center_x'])**2 + (node['y'] - bubble['center_y'])**2
-                if dist_sq <= bubble['radius']**2:
+                if (node['x'] - bubble['center_x'])**2 + (node['y'] - bubble['center_y'])**2 <= bubble['radius']**2:
                     count += 1
             node['bubble_count'] = count
 
@@ -293,8 +309,7 @@ class RoadNetworkVisualizer:
         viewport_bounds = (vx, vy, vw, vh)
 
         for bubble in self.bubbles:
-            center_x_img, center_y_img = bubble['center_x'], bubble['center_y']
-            cx, cy = self._image_to_canvas_coords(center_x_img, center_y_img)
+            cx, cy = self._image_to_canvas_coords(bubble['center_x'], bubble['center_y'])
             radius_canvas = bubble['radius'] * self.zoom_scale
             self.canvas.create_oval(cx - radius_canvas, cy - radius_canvas, cx + radius_canvas, cy + radius_canvas,
                                    fill=self.BUBBLE_COLOR, outline="", stipple="gray25", tags="bubble")
@@ -306,8 +321,7 @@ class RoadNetworkVisualizer:
 
             for conn in self.connections:
                 if conn['node1_id'] in visible_node_ids and conn['node2_id'] in visible_node_ids:
-                    node1 = self.nodes[conn['node1_id']]
-                    node2 = self.nodes[conn['node2_id']]
+                    node1, node2 = self.nodes[conn['node1_id']], self.nodes[conn['node2_id']]
                     x1, y1 = self._image_to_canvas_coords(node1['x'], node1['y'])
                     x2, y2 = self._image_to_canvas_coords(node2['x'], node2['y'])
                     self.canvas.create_line(x1, y1, x2, y2, fill=self.CONNECTION_COLOR, width=max(1, int(2 * self.zoom_scale)), tags="connection")
@@ -320,13 +334,17 @@ class RoadNetworkVisualizer:
                 if is_house:
                     bubble_count = node.get('bubble_count', 0)
                     if bubble_count > 0:
-                        palette_index = bubble_count - 1
-                        if palette_index >= len(self.HAZARD_PALETTE):
-                            palette_index = len(self.HAZARD_PALETTE) - 1
+                        palette_index = min(bubble_count - 1, len(self.HAZARD_PALETTE) - 1)
                         fill_color = self.HAZARD_PALETTE[palette_index]
                 
+                # --- NEW: Check for centroid status and set outline ---
+                outline_color, outline_width = "white", 1
+                if node.get('is_centroid', False):
+                    outline_color = self.CENTROID_OUTLINE_COLOR
+                    outline_width = self.CENTROID_OUTLINE_WIDTH
+
                 self.canvas.create_oval(cx - current_node_radius, cy - current_node_radius, cx + current_node_radius, cy + current_node_radius, 
-                                        fill=fill_color, outline="white", width=1, tags="node")
+                                        fill=fill_color, outline=outline_color, width=outline_width, tags="node")
                 
                 if draw_text:
                     font_size = max(5, int(8 * self.zoom_scale))
@@ -343,26 +361,18 @@ class RoadNetworkVisualizer:
         canvas_w = self.canvas.winfo_width()
         x_start, y_start = canvas_w - 180, 20
         box_size, padding, font_size = 18, 8, 9
-        
         legend_items = []
         for i, color in enumerate(self.HAZARD_PALETTE):
             label = f"{i + 1} Overlap"
             if i == len(self.HAZARD_PALETTE) - 1: label += "s+"
             legend_items.append((label, color))
-        
         bg_height = (len(legend_items) * (box_size + padding)) + padding
-        
-        self.canvas.create_rectangle(x_start - padding, y_start - padding, 
-                                     x_start + 150, y_start + bg_height,
+        self.canvas.create_rectangle(x_start - padding, y_start - padding, x_start + 150, y_start + bg_height,
                                      fill="white", outline="grey", stipple="gray50", tags="legend")
-
         for i, (label, color) in enumerate(legend_items):
             y_pos = y_start + i * (box_size + padding)
-            self.canvas.create_rectangle(x_start, y_pos, x_start + box_size, y_pos + box_size,
-                                         fill=color, outline="black", tags="legend")
-            self.canvas.create_text(x_start + box_size + padding, y_pos + box_size/2,
-                                    text=label, anchor=tk.W, tags="legend",
-                                    font=('Arial', font_size, 'normal'))
+            self.canvas.create_rectangle(x_start, y_pos, x_start + box_size, y_pos + box_size, fill=color, outline="black", tags="legend")
+            self.canvas.create_text(x_start + box_size + padding, y_pos + box_size/2, text=label, anchor=tk.W, tags="legend", font=('Arial', font_size, 'normal'))
     
     def _image_to_canvas_coords(self, ix, iy):
         return ix * self.zoom_scale + self.pan_x, iy * self.zoom_scale + self.pan_y
@@ -376,8 +386,7 @@ class RoadNetworkVisualizer:
     
     def _do_pan(self, event):
         dx, dy = event.x - self.last_mouse_x, event.y - self.last_mouse_y
-        self.pan_x += dx
-        self.pan_y += dy
+        self.pan_x += dx; self.pan_y += dy
         self.last_mouse_x, self.last_mouse_y = event.x, event.y
         self._full_redraw_canvas_elements()
 
@@ -396,39 +405,33 @@ class RoadNetworkVisualizer:
     def clear_all(self, from_load=False):
         do_clear = from_load or messagebox.askyesno("Clear All", "Are you sure you want to clear everything?")
         if do_clear:
-            self.nodes.clear()
-            self.connections.clear()
-            self.bubbles.clear()
-            self.quadtree = None
-            self.background_image_path = None
-            self.tile_dir = None
-            self.tile_cache.clear()
-            self.image_pyramid.clear()
+            self.nodes.clear(); self.connections.clear(); self.bubbles.clear()
+            self.quadtree = None; self.background_image_path = None; self.tile_dir = None
+            self.tile_cache.clear(); self.image_pyramid.clear()
             self.bg_image_width = self.bg_image_height = 0
             self.zoom_scale, self.pan_x, self.pan_y = 1.0, 0, 0
             self.mode = 'VIEW'
             self.canvas.config(cursor="")
             if not from_load:
                 self._full_redraw_canvas_elements()
-                self.update_status_bar("All cleared. Load a network file to start.")
+                self.update_status_bar("All cleared.")
 
     def save_network(self):
-        if not self.nodes and not self.connections:
-            messagebox.showinfo("Info", "No network to save.")
-            return
+        if not self.nodes: return
         file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")], title="Save Road Network")
         if file_path:
             nodes_to_save = []
             for node in self.nodes.values():
                 node_copy = node.copy()
                 node_copy.pop('bubble_count', None)
+                # --- MODIFIED: Ensure 'is_centroid' is only saved if True ---
+                if not node_copy.get('is_centroid', False):
+                    node_copy.pop('is_centroid', None) # Remove if False or non-existent
                 nodes_to_save.append(node_copy)
 
             data_to_save = {
                 'background_image_path': self.background_image_path,
-                'nodes': nodes_to_save, 
-                'connections': self.connections,
-                'bubbles': self.bubbles,
+                'nodes': nodes_to_save, 'connections': self.connections, 'bubbles': self.bubbles,
                 'next_node_id': getattr(self, 'next_node_id', len(self.nodes) + 1),
                 'view_state': {'zoom': self.zoom_scale, 'pan_x': self.pan_x, 'pan_y': self.pan_y}
             }
@@ -447,31 +450,21 @@ class RoadNetworkVisualizer:
 
             bg_path = data.get('background_image_path')
             if bg_path and os.path.isdir(bg_path):
-                # This is the line that caused the error before the fix
                 self.load_background_image_from_path(bg_path)
-            else:
-                 messagebox.showwarning("Warning", "Could not find the background tile directory.")
-
-            for node in data.get('nodes', []):
-                self.nodes[node['id']] = node
-
-            self.connections = data.get('connections', [])
-            self.bubbles = data.get('bubbles', [])
+            
+            for node in data.get('nodes', []): self.nodes[node['id']] = node
+            self.connections = data.get('connections', []); self.bubbles = data.get('bubbles', [])
             self.next_node_id = data.get('next_node_id', len(self.nodes) + 1)
-
             self._update_node_bubble_containment()
             
             if self.bg_image_width > 0:
                 boundary = (0, 0, self.bg_image_width, self.bg_image_height)
                 self.quadtree = Quadtree(boundary)
-                for node in self.nodes.values():
-                    self.quadtree.insert(node)
+                for node in self.nodes.values(): self.quadtree.insert(node)
 
             view_state = data.get('view_state', {})
             self.zoom_scale = view_state.get('zoom', 1.0)
-            self.pan_x = view_state.get('pan_x', 0)
-            self.pan_y = view_state.get('pan_y', 0)
-
+            self.pan_x = view_state.get('pan_x', 0); self.pan_y = view_state.get('pan_y', 0)
             self._full_redraw_canvas_elements()
             messagebox.showinfo("Load Successful", f"Network loaded from {file_path}")
         except Exception as e:
@@ -479,6 +472,31 @@ class RoadNetworkVisualizer:
             self.clear_all(from_load=True)
             self._full_redraw_canvas_elements()
             
+    def load_background_image_from_path(self, tile_dir_path):
+        try:
+            level_dirs = [d for d in os.listdir(tile_dir_path) if d.isdigit()]
+            if not level_dirs:
+                messagebox.showerror("Error", "Directory lacks level subfolders ('0', '1',...).")
+                return
+            self.image_pyramid.clear()
+            for level_str in level_dirs:
+                level, max_x, max_y = int(level_str), 0, 0
+                level_path = os.path.join(tile_dir_path, level_str)
+                for tile_name in os.listdir(level_path):
+                    if tile_name.endswith('.png'):
+                        parts = os.path.splitext(tile_name)[0].split('_')
+                        if len(parts) == 2:
+                            max_x, max_y = max(max_x, int(parts[0])), max(max_y, int(parts[1]))
+                self.image_pyramid[level] = (max_x + self.tile_size, max_y + self.tile_size)
+            self.tile_dir = tile_dir_path
+            self.background_image_path = tile_dir_path
+            if 0 in self.image_pyramid:
+                self.bg_image_width, self.bg_image_height = self.image_pyramid[0]
+            else:
+                messagebox.showerror("Error", "Could not find base level '0' in tile directory.")
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Could not process tile directory: {e}")
+
     def _draw_background(self):
         self.canvas.delete("background")
         if not self.tile_dir or self.bg_image_width <= 0: return
