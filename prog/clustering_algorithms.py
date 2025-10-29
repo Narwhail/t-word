@@ -5,7 +5,6 @@ import time
 import networkx as nx
 
 # --- Base Geometric Clustering Algorithms ---
-
 class PAM:
     """
     PAM (Partitioning Around Medoids) using GEOMETRIC (Euclidean) distance.
@@ -14,22 +13,44 @@ class PAM:
         # Accepts **kwargs to be compatible with super() in child classes
         self.k, self.max_iterations, self.use_build, self.verbose = k, max_iterations, use_build, verbose
         self.medoids, self.labels_, self.iterations_ = None, None, 0
+        self.final_cost_ = float('inf') # Attribute to store the final cost
 
     def build_phase(self, data):
         """
-        Selects initial medoids.
-        MODIFIED: Ensures that k medoids are always selected if the dataset is large enough.
+        MODIFIED: Selects initial medoids, correctly handling pre-defined centroids
+        by prioritizing them but never selecting more than k.
         """
         n = len(data)
         medoid_indices = []
         if self.verbose: print("\n  (PAM) BUILD Phase on sample...")
 
-        # Start with pre-defined centroids if they exist
-        for i, node in enumerate(data):
-            if isinstance(node, dict) and node.get('is_centroid'):
-                medoid_indices.append(i)
+        # --- START OF FIX ---
+        # Step 1: Find all pre-defined centroids first.
+        predefined_centroids = [i for i, node in enumerate(data) if node.get('is_centroid')]
 
-        # Find the first medoid if none are pre-defined
+        if predefined_centroids:
+            num_predefined = len(predefined_centroids)
+            if self.verbose:
+                print(f"  (PAM) Found {num_predefined} pre-defined centroids in the data.")
+
+            # Step 2: If there are more pre-defined centroids than k,
+            # take the first k and warn the user.
+            if num_predefined >= self.k:
+                if self.verbose:
+                    print(f"  (PAM) WARNING: {num_predefined} pre-defined centroids found, but k is {self.k}.")
+                    print(f"           Using the first {self.k} pre-defined centroids as the initial medoids.")
+                medoid_indices = predefined_centroids[:self.k]
+                return np.array(medoid_indices)
+
+            # Step 3: If there are fewer than k, use all of them as the starting seed.
+            else:
+                if self.verbose:
+                    print(f"  (PAM) Using all {num_predefined} pre-defined centroids as the initial seed.")
+                medoid_indices.extend(predefined_centroids)
+        # --- END OF FIX ---
+
+
+        # Find the first medoid if none were pre-defined
         if not medoid_indices:
             min_total_dist, first_medoid = float('inf'), 0
             for i in range(n):
@@ -38,11 +59,10 @@ class PAM:
                     min_total_dist, first_medoid = total_dist, i
             medoid_indices.append(first_medoid)
 
-        # Iteratively add the remaining medoids
+        # Iteratively add the remaining medoids until we have k
         while len(medoid_indices) < self.k:
             max_gain, best_candidate = -float('inf'), -1
             
-            # --- START OF FIX ---
             candidate_nodes = [i for i in range(n) if i not in medoid_indices]
             if not candidate_nodes: # Stop if no more nodes are available
                 break
@@ -55,12 +75,9 @@ class PAM:
             if best_candidate != -1:
                 medoid_indices.append(best_candidate)
             else:
-                # MODIFIED: If no candidate gives positive gain, we must still add a medoid
-                # to reach k. We'll pick a random one from the remaining candidates.
                 if self.verbose:
                     print("  (PAM) BUILD Phase: No candidate offered positive gain. Selecting a random node to continue.")
                 medoid_indices.append(np.random.choice(candidate_nodes))
-            # --- END OF FIX ---
 
         return np.array(medoid_indices)
 
@@ -112,29 +129,42 @@ class PAM:
         return new_cost - old_cost
 
     def fit(self, data):
-        # ... (no changes in this method)
+        """
+        MODIFIED: This method now raises a clear error if k is larger than the
+        number of data points, preventing confusing output.
+        """
         n = len(data)
-        if n < self.k:
+
+        # Add an explicit check to prevent k from being larger than the number of data points.
+        if self.k > n:
+            raise ValueError(
+                f"The number of requested clusters (k={self.k}) cannot be greater than "
+                f"the number of data points available (n={n}).\n"
+                f"Please set K_CLUSTERS to a value less than or equal to {n}."
+            )
+
+        if n == self.k:
             if self.verbose:
-                print(f"  (PAM) WARNING: Number of data points ({n}) is less than k ({self.k}).")
-                print("           Setting all data points as medoids.")
+                print(f"  (PAM) INFO: Number of clusters k ({self.k}) is equal to the number of data points ({n}).")
+                print("          Every data point will become its own cluster.")
             self.medoids = np.arange(n)
             self.labels_ = np.arange(n)
             self.iterations_ = 0
+            self.final_cost_ = 0
             return self
 
         medoid_indices = self.build_phase(data) if self.use_build else np.random.choice(n, self.k, replace=False)
-        if len(medoid_indices) < self.k:
-            remaining_indices = [i for i in range(n) if i not in medoid_indices]
-            needed = self.k - len(medoid_indices)
-            if len(remaining_indices) >= needed:
-                medoid_indices = np.concatenate([medoid_indices, np.random.choice(remaining_indices, needed, replace=False)])
+        
         changed, self.iterations_ = True, 0
         if self.verbose: print("  (PAM) SWAP Phase on sample...")
         while changed and self.iterations_ < self.max_iterations:
             changed, self.iterations_ = False, self.iterations_ + 1
             assignments = self.assign_clusters(data, medoid_indices)
-            for m in range(self.k):
+            
+            # --- MINOR FIX: Iterate over the actual number of medoids found ---
+            # This prevents an error if build_phase somehow returns fewer than k.
+            for m in range(len(medoid_indices)):
+                # Don't swap medoids that were pre-defined as centroids
                 if isinstance(data[medoid_indices[m]], dict) and data[medoid_indices[m]].get('is_centroid'):
                     continue
                 best_swap_cost, best_swap_candidate = 0, None
@@ -145,10 +175,12 @@ class PAM:
                             best_swap_cost, best_swap_candidate = swap_cost, i
                 if best_swap_candidate is not None:
                     medoid_indices[m], changed = best_swap_candidate, True
+
         self.medoids = medoid_indices
         self.labels_ = self.assign_clusters(data, medoid_indices)
+        self.final_cost_ = self.calculate_total_cost(data, self.medoids, self.labels_)
         return self
-
+    
 class CLARA(PAM):
     """
     CLARA algorithm, which applies PAM on multiple samples of the data to handle

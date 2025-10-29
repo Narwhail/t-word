@@ -1,3 +1,5 @@
+# main.py (with immediate runtime printing)
+
 import numpy as np
 import matplotlib.pyplot as plt
 import time
@@ -8,7 +10,6 @@ from datetime import datetime
 import networkx as nx
 
 # --- Import the clustering algorithms from your separate file ---
-# MODIFIED: Import PAM_Network_RiskAware to run it directly
 from clustering_algorithms import CLARA, CLARA_Network, CLARA_Network_RiskAware, PAM_Network_RiskAware
 
 class Logger(object):
@@ -147,9 +148,15 @@ def plot_risk_aware_clusters(ax, title, labels, medoids, house_nodes, bubbles, k
         ax.add_patch(circle)
 
     # Plot clusters
-    colors = plt.cm.viridis(np.linspace(0, 1, k))
+    num_clusters = len(np.unique(labels))
+    if num_clusters == 0:
+        print("Warning: No clusters to plot.")
+        return
+        
+    colors = plt.cm.viridis(np.linspace(0, 1, num_clusters))
     X_coords = np.array([[node['x'], node['y']] for node in house_nodes])
-    for i in range(k):
+    
+    for i in range(num_clusters):
         cluster_mask = (labels == i)
         ax.scatter(X_coords[cluster_mask, 0], X_coords[cluster_mask, 1],
                    c=[colors[i]], label=f'Cluster {i+1}', alpha=0.7, s=20)
@@ -187,7 +194,12 @@ def run_risk_aware_comparison(json_file_path, k, num_samples, fire_risk_weight, 
         all_nodes = user_data.get('nodes', [])
         connections = user_data.get('connections', [])
         bubbles = user_data.get('bubbles', [])
-        house_nodes = [node for node in all_nodes if node.get('is_house', False)]
+        
+        house_nodes = [node for node in all_nodes if node.get('is_house') is True]
+        if not house_nodes:
+            print("FATAL ERROR: No house nodes were found. Please check your dataset.json file.")
+            return
+            
         road_nodes = [node for node in all_nodes if not node.get('is_house', False)]
 
         risk_scores = calculate_risk_scores(house_nodes, bubbles)
@@ -210,6 +222,10 @@ def run_risk_aware_comparison(json_file_path, k, num_samples, fire_risk_weight, 
             start_time = time.time()
             clara_risk_network.fit(house_nodes)
             runtime = time.time() - start_time
+            
+            # --- NEW: Immediate runtime print ---
+            print(f"\n### CLARA execution finished in {runtime:.2f} seconds. ###")
+
             if clara_risk_network.medoids_ is not None:
                 results['CLARA'] = {
                     'cost': clara_risk_network.best_cost_, 'runtime': runtime,
@@ -227,15 +243,18 @@ def run_risk_aware_comparison(json_file_path, k, num_samples, fire_risk_weight, 
                 fire_risk_weight=fire_risk_weight, verbose=True
             )
             start_time = time.time()
-            pam_risk_network.fit(house_nodes) # Fit on the entire dataset
+            pam_risk_network.fit(house_nodes)
             runtime = time.time() - start_time
             
-            # Convert medoid indices to actual house IDs
+            # --- NEW: Immediate runtime print ---
+            print(f"\n### PAM execution finished in {runtime:.2f} seconds. ###")
+            
             medoid_ids = [house_nodes[i]['id'] for i in pam_risk_network.medoids]
-            final_cost = pam_risk_network.calculate_total_cost(house_nodes, pam_risk_network.medoids, pam_risk_network.labels_)
             results['PAM'] = {
-                'cost': final_cost, 'runtime': runtime,
-                'medoids': medoid_ids, 'labels': pam_risk_network.labels_
+                'cost': pam_risk_network.final_cost_, 
+                'runtime': runtime,
+                'medoids': medoid_ids, 
+                'labels': pam_risk_network.labels_
             }
 
         # --- 3. Display Results ---
@@ -249,10 +268,10 @@ def run_risk_aware_comparison(json_file_path, k, num_samples, fire_risk_weight, 
             print(f"{'PAM Risk-Aware (Full Data)':<30} | {results['PAM']['cost']:<25.2f} | {results['PAM']['runtime']:<20.2f}")
         else:
             for algo_name, res in results.items():
-                print(f"Algorithm: {algo_name} Risk-Aware")
-                print(f"Final Weighted Cost: {res['cost']:.2f}")
-                print(f"Runtime: {res['runtime']:.2f} seconds")
-                print(f"Final Medoid House IDs: {res['medoids']}")
+                print(f"\n--- {algo_name} Risk-Aware ---")
+                print(f"  Final Weighted Cost: {res['cost']:.2f}")
+                print(f"  Runtime: {res['runtime']:.2f} seconds")
+                print(f"  Final Medoid House IDs: {res['medoids']}")
         print("=" * 80)
 
         # --- 4. Visualize Final Clustering ---
@@ -263,28 +282,37 @@ def run_risk_aware_comparison(json_file_path, k, num_samples, fire_risk_weight, 
         print("\nGenerating final visualization...")
         if algo_mode == "BOTH" and 'CLARA' in results and 'PAM' in results:
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 11))
+            k_clara = len(results['CLARA']['medoids'])
+            k_pam = len(results['PAM']['medoids'])
+            
             plot_risk_aware_clusters(ax1, 'CLARA Risk-Aware Network Clustering', 
                                      results['CLARA']['labels'], results['CLARA']['medoids'], 
-                                     house_nodes, bubbles, k, results['CLARA']['cost'])
+                                     house_nodes, bubbles, k_clara, results['CLARA']['cost'])
             plot_risk_aware_clusters(ax2, 'PAM Risk-Aware Network Clustering', 
                                      results['PAM']['labels'], results['PAM']['medoids'], 
-                                     house_nodes, bubbles, k, results['PAM']['cost'])
+                                     house_nodes, bubbles, k_pam, results['PAM']['cost'])
             plt.tight_layout()
         elif 'CLARA' in results:
             plt.figure(figsize=(12, 10))
+            k_clara = len(results['CLARA']['medoids'])
             plot_risk_aware_clusters(plt.gca(), 'CLARA Risk-Aware Network Clustering',
                                      results['CLARA']['labels'], results['CLARA']['medoids'],
-                                     house_nodes, bubbles, k, results['CLARA']['cost'])
+                                     house_nodes, bubbles, k_clara, results['CLARA']['cost'])
         elif 'PAM' in results:
             plt.figure(figsize=(12, 10))
+            k_pam = len(results['PAM']['medoids'])
             plot_risk_aware_clusters(plt.gca(), 'PAM Risk-Aware Network Clustering',
                                      results['PAM']['labels'], results['PAM']['medoids'],
-                                     house_nodes, bubbles, k, results['PAM']['cost'])
+                                     house_nodes, bubbles, k_pam, results['PAM']['cost'])
         
         final_plot_path = f'risk_aware_comparison_result_{timestamp}.png'
         plt.savefig(final_plot_path, dpi=150, bbox_inches='tight')
         print(f"Final plot saved as '{final_plot_path}'")
         plt.show()
+
+    except Exception as e:
+        print(f"\nAN ERROR OCCURRED: {e}")
+        raise
 
     finally:
         sys.stdout = original_stdout
@@ -295,22 +323,13 @@ def run_risk_aware_comparison(json_file_path, k, num_samples, fire_risk_weight, 
 if __name__ == "__main__":
     # --- USER CONFIGURATION ---
     JSON_FILE_PATH = 'dataset.json'
-    # JSON_FILE_PATH = 'smb-dataset.json'
-
     K_CLUSTERS = 10
     NUM_SAMPLES = 3
     FIRE_RISK_WEIGHT = 1.5
     
-    # --- NEW: CHOOSE WHICH ALGORITHM(S) TO RUN ---
-    # Options:
-    # "CLARA" -> Runs only the fast, sampled-based CLARA algorithm.
-    # "PAM"   -> Runs the PAM algorithm on the FULL dataset (can be slow).
-    # "BOTH"  -> Runs both and shows a side-by-side comparison.
     ALGORITHM_MODE = "BOTH"
     # ----------------------------------------------
 
-    # --- CHOOSE WHICH EXPERIMENT TO RUN ---
-    # This single function now handles all risk-aware scenarios.
     run_risk_aware_comparison(
         JSON_FILE_PATH, K_CLUSTERS, NUM_SAMPLES, FIRE_RISK_WEIGHT, ALGORITHM_MODE
     )
