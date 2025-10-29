@@ -1,3 +1,5 @@
+# clustering_algorithms.py
+
 import numpy as np
 import time
 import networkx as nx
@@ -14,13 +16,20 @@ class PAM:
         self.medoids, self.labels_, self.iterations_ = None, None, 0
 
     def build_phase(self, data):
-        # ... (no changes in this method)
+        """
+        Selects initial medoids.
+        MODIFIED: Ensures that k medoids are always selected if the dataset is large enough.
+        """
         n = len(data)
         medoid_indices = []
         if self.verbose: print("\n  (PAM) BUILD Phase on sample...")
+
+        # Start with pre-defined centroids if they exist
         for i, node in enumerate(data):
             if isinstance(node, dict) and node.get('is_centroid'):
                 medoid_indices.append(i)
+
+        # Find the first medoid if none are pre-defined
         if not medoid_indices:
             min_total_dist, first_medoid = float('inf'), 0
             for i in range(n):
@@ -28,18 +37,33 @@ class PAM:
                 if total_dist < min_total_dist:
                     min_total_dist, first_medoid = total_dist, i
             medoid_indices.append(first_medoid)
+
+        # Iteratively add the remaining medoids
         while len(medoid_indices) < self.k:
             max_gain, best_candidate = -float('inf'), -1
-            for i in range(n):
-                if i not in medoid_indices:
-                    gain = self.calculate_gain(data, medoid_indices, i)
-                    if gain > max_gain:
-                        max_gain, best_candidate = gain, i
+            
+            # --- START OF FIX ---
+            candidate_nodes = [i for i in range(n) if i not in medoid_indices]
+            if not candidate_nodes: # Stop if no more nodes are available
+                break
+
+            for i in candidate_nodes:
+                gain = self.calculate_gain(data, medoid_indices, i)
+                if gain > max_gain:
+                    max_gain, best_candidate = gain, i
+            
             if best_candidate != -1:
                 medoid_indices.append(best_candidate)
             else:
-                break
+                # MODIFIED: If no candidate gives positive gain, we must still add a medoid
+                # to reach k. We'll pick a random one from the remaining candidates.
+                if self.verbose:
+                    print("  (PAM) BUILD Phase: No candidate offered positive gain. Selecting a random node to continue.")
+                medoid_indices.append(np.random.choice(candidate_nodes))
+            # --- END OF FIX ---
+
         return np.array(medoid_indices)
+
 
     def calculate_gain(self, data, current_medoids, candidate):
         # ... (no changes in this method)
@@ -90,6 +114,15 @@ class PAM:
     def fit(self, data):
         # ... (no changes in this method)
         n = len(data)
+        if n < self.k:
+            if self.verbose:
+                print(f"  (PAM) WARNING: Number of data points ({n}) is less than k ({self.k}).")
+                print("           Setting all data points as medoids.")
+            self.medoids = np.arange(n)
+            self.labels_ = np.arange(n)
+            self.iterations_ = 0
+            return self
+
         medoid_indices = self.build_phase(data) if self.use_build else np.random.choice(n, self.k, replace=False)
         if len(medoid_indices) < self.k:
             remaining_indices = [i for i in range(n) if i not in medoid_indices]

@@ -295,6 +295,8 @@ def run_risk_aware_comparison(json_file_path, k, num_samples, fire_risk_weight, 
 if __name__ == "__main__":
     # --- USER CONFIGURATION ---
     JSON_FILE_PATH = 'dataset.json'
+    # JSON_FILE_PATH = 'smb-dataset.json'
+
     K_CLUSTERS = 10
     NUM_SAMPLES = 3
     FIRE_RISK_WEIGHT = 1.5
