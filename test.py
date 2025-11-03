@@ -17,15 +17,18 @@ def save_cluster_plot(clusters, medoids, k, title, filepath):
     plt.figure(figsize=(12, 10))
     colors = plt.cm.viridis(np.linspace(0, 1, k))
 
-    for i, (medoid_id, points) in enumerate(clusters.items()):
+    # Create a mapping from medoid ID to a color index (0 to k-1)
+    medoid_to_color_idx = {m['id']: i for i, m in enumerate(medoids)}
+
+    for medoid_id, points in clusters.items():
         if not points: continue
-        # Ensure medoid_id is a key in the medoids dictionary before accessing
-        medoid_obj = next((m for m in medoids if m['id'] == medoid_id), None)
-        if medoid_obj is None: continue
+        
+        color_idx = medoid_to_color_idx.get(medoid_id)
+        if color_idx is None: continue # Should not happen if clusters are consistent
 
         cluster_coords = np.array([[p['x'], p['y']] for p in points])
         plt.scatter(cluster_coords[:, 0], cluster_coords[:, 1],
-                    c=[colors[i]], label=f'Cluster {i+1}', alpha=0.7, s=30)
+                    c=[colors[color_idx]], label=f'Cluster {color_idx+1}', alpha=0.7, s=30)
 
     medoid_coords = np.array([[m['x'], m['y']] for m in medoids])
     plt.scatter(medoid_coords[:, 0], medoid_coords[:, 1], c='red', marker='X', s=400,
@@ -34,7 +37,11 @@ def save_cluster_plot(clusters, medoids, k, title, filepath):
     plt.title(title, fontsize=16, fontweight='bold')
     plt.xlabel('X Coordinate')
     plt.ylabel('Y Coordinate')
-    plt.legend()
+    # Avoid duplicate labels in the legend
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys())
+    
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.gca().set_aspect('equal', adjustable='box')
     
@@ -47,11 +54,14 @@ class KMedoids:
     A class to perform K-medoid clustering using either the
     Partitioning Around Medoids (PAM) or CLARA algorithm for the swap phase.
     """
-    def __init__(self, k=2, max_iter=100, swap_phase_method='pam', num_samples=5, sample_size=None, verbose=False):
+    def __init__(self, k=2, max_iter=100, swap_phase_method='pam', 
+                 num_samples=5, sample_size=None, clara_plot_scope='sample', verbose=False):
         if k < 1: raise ValueError("The number of clusters (k) must be greater than 0.")
         if swap_phase_method not in ['pam', 'clara']:
             raise ValueError("swap_phase_method must be either 'pam' or 'clara'.")
-        
+        if clara_plot_scope not in ['sample', 'full']:
+            raise ValueError("clara_plot_scope must be either 'sample' or 'full'.")
+
         self.k = k
         self.max_iter = max_iter
         self.swap_phase_method = swap_phase_method
@@ -60,10 +70,10 @@ class KMedoids:
         # --- CLARA specific parameters ---
         self.num_samples = num_samples
         self.sample_size = sample_size
+        self.clara_plot_scope = clara_plot_scope
 
         if self.swap_phase_method == 'clara':
             if self.sample_size is None:
-                # Set a default sample size based on literature suggestions if not provided
                 self.sample_size = 40 + 2 * self.k
                 if self.verbose:
                     print(f"CLARA sample_size not provided. Defaulting to 40 + 2*k = {self.sample_size}")
@@ -77,6 +87,7 @@ class KMedoids:
         return math.sqrt((p1['x'] - p2['x'])**2 + (p1['y'] - p2['y'])**2)
 
     def _calculate_total_cost(self, data, medoids):
+        if not medoids: return float('inf')
         total_cost = 0
         for point in data:
             cost = min(self._euclidean_distance(point, m) for m in medoids)
@@ -84,29 +95,33 @@ class KMedoids:
         return total_cost
 
     def _assign_points_to_clusters(self, data, medoids):
+        if not medoids: return {}
         clusters = {medoid['id']: [] for medoid in medoids}
         for point in data:
             closest_medoid = min(medoids, key=lambda medoid: self._euclidean_distance(point, medoid))
             clusters[closest_medoid['id']].append(point)
         return clusters
 
-    def _run_pam_swap_phase(self, data_subset, enable_iter_plotting=False, output_dir=None):
+    def _run_pam_swap_phase(self, data_subset, initial_medoids=None, enable_iter_plotting=False, 
+                            output_dir=None, plot_prefix='iteration', plotting_data=None):
         """
         Runs the iterative PAM swap phase on a given subset of data.
-        Returns the best medoids found for this subset.
+        - data_subset: The data to use for cost calculation and finding medoids.
+        - plotting_data: Optional. The data to use for generating visualizations.
+                         If None, data_subset is used.
         """
-        current_medoids = random.sample(data_subset, self.k)
+        current_medoids = initial_medoids if initial_medoids else random.sample(data_subset, self.k)
+        data_to_plot = plotting_data if plotting_data is not None else data_subset
 
-        if self.verbose and enable_iter_plotting:
-            initial_cost = self._calculate_total_cost(data_subset, current_medoids)
-            print(f"Initial cost for this run: {initial_cost:.2f}")
-            if output_dir:
-                initial_clusters = self._assign_points_to_clusters(data_subset, current_medoids)
-                filepath = os.path.join(output_dir, 'iteration_000_initial.png')
-                save_cluster_plot(initial_clusters, current_medoids, self.k, 'Initial State (Iteration 0)', filepath)
+        if self.verbose and enable_iter_plotting and output_dir:
+            initial_clusters = self._assign_points_to_clusters(data_to_plot, current_medoids)
+            filepath = os.path.join(output_dir, f'{plot_prefix}_000_initial.png')
+            title = f'Initial State ({plot_prefix.split("_")[1]} {plot_prefix.split("_")[2]})'
+            save_cluster_plot(initial_clusters, current_medoids, self.k, title, filepath)
 
         for i in range(self.max_iter):
             iter_start_time = time.time()
+            # Cost calculation is ALWAYS based on the data_subset
             best_cost_for_subset = self._calculate_total_cost(data_subset, current_medoids)
             potential_best_medoids = current_medoids[:]
             made_swap = False
@@ -125,16 +140,17 @@ class KMedoids:
             current_medoids = potential_best_medoids
             iter_runtime = time.time() - iter_start_time
 
-            if self.verbose and enable_iter_plotting:
-                print(f"Iteration {i + 1}: Cost = {best_cost_for_subset:.2f}, Swap: {made_swap}, Runtime: {iter_runtime:.4f}s")
-                if output_dir:
-                    current_clusters = self._assign_points_to_clusters(data_subset, current_medoids)
-                    filepath = os.path.join(output_dir, f'iteration_{i+1:03d}.png')
-                    title = f'State after Iteration {i+1}'
-                    save_cluster_plot(current_clusters, current_medoids, self.k, title, filepath)
+            if self.verbose:
+                print(f"  - Iteration {i + 1}: Cost (on subset) = {best_cost_for_subset:.2f}, Swap: {made_swap}, Runtime: {iter_runtime:.4f}s")
+                if enable_iter_plotting and output_dir:
+                    # Plotting is based on plotting_data
+                    clusters_to_plot = self._assign_points_to_clusters(data_to_plot, current_medoids)
+                    filepath = os.path.join(output_dir, f'{plot_prefix}_{i+1:03d}.png')
+                    title = f'State after Iteration {i+1} ({plot_prefix.split("_")[1]} {plot_prefix.split("_")[2]})'
+                    save_cluster_plot(clusters_to_plot, current_medoids, self.k, title, filepath)
 
             if not made_swap:
-                if self.verbose and enable_iter_plotting: print("\nAlgorithm converged for this subset.")
+                if self.verbose: print("  - PAM converged for this subset.")
                 break
         
         return current_medoids
@@ -152,12 +168,15 @@ class KMedoids:
 
         if self.swap_phase_method == 'pam':
             if self.verbose: print("\n--- Running Standard PAM Algorithm ---")
-            self.medoids = self._run_pam_swap_phase(data, enable_iter_plotting=True, output_dir=output_dir)
+            initial_medoids = random.sample(data, self.k)
+            self.medoids = self._run_pam_swap_phase(data, initial_medoids, enable_iter_plotting=self.verbose, 
+                                                    output_dir=output_dir, plot_prefix='pam_iter')
 
         elif self.swap_phase_method == 'clara':
             if self.verbose:
                 print(f"\n--- Running CLARA Algorithm ---")
                 print(f"Number of samples: {self.num_samples}, Sample size: {self.sample_size}")
+                print(f"Plotting scope for iterations: '{self.clara_plot_scope}'")
             
             best_medoids_so_far = None
             min_overall_cost = float('inf')
@@ -166,10 +185,18 @@ class KMedoids:
                 sample_data = random.sample(data, self.sample_size)
                 if self.verbose: print(f"\nProcessing Sample {i+1}/{self.num_samples}...")
                 
-                # Run PAM on the sample; plotting is disabled for these sub-runs
-                sample_medoids = self._run_pam_swap_phase(sample_data, enable_iter_plotting=False)
+                # Determine what data to use for plotting the sub-iterations
+                data_for_plotting = data if self.clara_plot_scope == 'full' else sample_data
                 
-                # Evaluate the cost of the sample's medoids against the ENTIRE dataset
+                # Run PAM on the sample, with plotting enabled if verbose is on
+                sample_medoids = self._run_pam_swap_phase(
+                    sample_data,
+                    enable_iter_plotting=self.verbose,
+                    output_dir=output_dir,
+                    plot_prefix=f'clara_sample_{i+1:03d}_iter',
+                    plotting_data=data_for_plotting
+                )
+                
                 current_overall_cost = self._calculate_total_cost(data, sample_medoids)
                 if self.verbose: print(f"  - Cost of sample's medoids on full dataset: {current_overall_cost:.2f}")
 
@@ -203,10 +230,15 @@ def plot_final_clusters(clusters, medoids, k, method_name, output_dir=None):
     plt.figure(figsize=(12, 10))
     colors = plt.cm.viridis(np.linspace(0, 1, k))
     
-    for i, (medoid_id, points) in enumerate(clusters.items()):
+    medoid_to_color_idx = {m['id']: i for i, m in enumerate(medoids)}
+
+    for medoid_id, points in clusters.items():
         if not points: continue
+        color_idx = medoid_to_color_idx.get(medoid_id)
+        if color_idx is None: continue
+
         cluster_coords = np.array([[p['x'], p['y']] for p in points])
-        plt.scatter(cluster_coords[:, 0], cluster_coords[:, 1], c=[colors[i]], label=f'Cluster {i+1}', alpha=0.7, s=30)
+        plt.scatter(cluster_coords[:, 0], cluster_coords[:, 1], c=[colors[color_idx]], label=f'Cluster {color_idx+1}', alpha=0.7, s=30)
 
     medoid_coords = np.array([[m['x'], m['y']] for m in medoids])
     plt.scatter(medoid_coords[:, 0], medoid_coords[:, 1], c='red', marker='X', s=400,
@@ -215,7 +247,9 @@ def plot_final_clusters(clusters, medoids, k, method_name, output_dir=None):
     plt.title(f'Final K-Medoid ({method_name.upper()}) Clustering Results', fontsize=16, fontweight='bold')
     plt.xlabel('X Coordinate')
     plt.ylabel('Y Coordinate')
-    plt.legend()
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys())
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.gca().set_aspect('equal', adjustable='box')
     
@@ -244,16 +278,18 @@ if __name__ == '__main__':
 
         # --- USER CONFIGURATION ---
         K_CLUSTERS = 3
-        SHOW_LOGS_AND_SAVE_ITERATIONS = True
+        SHOW_LOGS_AND_SAVE_PLOTS = True 
         
-        # Choose the swap phase method: 'pam' or 'clara'
-        SWAP_METHOD = 'clara'  # <-- CHANGE THIS to 'pam' to run the base algorithm
+        SWAP_METHOD = 'clara'
 
-        # --- CLARA-specific parameters (only used if SWAP_METHOD is 'clara') ---
+        # --- CLARA-specific parameters ---
         NUM_SAMPLES = 3
-        # If SAMPLE_SIZE is None, a default of 40 + 2*k will be used.
-        # Otherwise, specify a size, e.g., 100. It must be > k.
-        SAMPLE_SIZE = 320 
+        SAMPLE_SIZE = 320
+        
+        # --- NEW: Choose the scope for CLARA's iteration plots ---
+        # 'sample': Shows only the small random sample being processed. (Faster)
+        # 'full':   Shows the entire dataset clustered by the sample's medoids. (More insightful)
+        CLARA_PLOT_SCOPE = 'sample'
         
         # --- Create a unique output folder for this run ---
         output_folder = f"run_{SWAP_METHOD}_{time.strftime('%Y%m%d-%H%M%S')}"
@@ -268,7 +304,8 @@ if __name__ == '__main__':
             swap_phase_method=SWAP_METHOD,
             num_samples=NUM_SAMPLES,
             sample_size=SAMPLE_SIZE,
-            verbose=SHOW_LOGS_AND_SAVE_ITERATIONS
+            clara_plot_scope=CLARA_PLOT_SCOPE,
+            verbose=SHOW_LOGS_AND_SAVE_PLOTS
         )
         
         kmedoids_model.fit(nodes_data, output_dir=output_folder)
@@ -277,8 +314,10 @@ if __name__ == '__main__':
         final_clusters = kmedoids_model.clusters
 
         print("\n--- Clustering Results ---")
-        print("\nFinal Medoids (Cluster Centers):")
-        for medoid in final_medoids:
-            print(f"  - Node ID: {medoid['id']}, Coordinates: (x={medoid['x']}, y={medoid['y']})")
-
-        plot_final_clusters(final_clusters, final_medoids, K_CLUSTERS, SWAP_METHOD, output_dir=output_folder)
+        if final_medoids:
+            print("\nFinal Medoids (Cluster Centers):")
+            for medoid in final_medoids:
+                print(f"  - Node ID: {medoid['id']}, Coordinates: (x={medoid['x']}, y={medoid['y']})")
+            plot_final_clusters(final_clusters, final_medoids, K_CLUSTERS, SWAP_METHOD, output_dir=output_folder)
+        else:
+            print("Clustering did not result in a set of medoids.")
