@@ -17,14 +17,13 @@ def save_cluster_plot(clusters, medoids, k, title, filepath):
     plt.figure(figsize=(12, 10))
     colors = plt.cm.viridis(np.linspace(0, 1, k))
 
-    # Create a mapping from medoid ID to a color index (0 to k-1)
     medoid_to_color_idx = {m['id']: i for i, m in enumerate(medoids)}
 
     for medoid_id, points in clusters.items():
         if not points: continue
         
         color_idx = medoid_to_color_idx.get(medoid_id)
-        if color_idx is None: continue # Should not happen if clusters are consistent
+        if color_idx is None: continue
 
         cluster_coords = np.array([[p['x'], p['y']] for p in points])
         plt.scatter(cluster_coords[:, 0], cluster_coords[:, 1],
@@ -37,7 +36,6 @@ def save_cluster_plot(clusters, medoids, k, title, filepath):
     plt.title(title, fontsize=16, fontweight='bold')
     plt.xlabel('X Coordinate')
     plt.ylabel('Y Coordinate')
-    # Avoid duplicate labels in the legend
     handles, labels = plt.gca().get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
     plt.legend(by_label.values(), by_label.keys())
@@ -67,7 +65,6 @@ class KMedoids:
         self.swap_phase_method = swap_phase_method
         self.verbose = verbose
         
-        # --- CLARA specific parameters ---
         self.num_samples = num_samples
         self.sample_size = sample_size
         self.clara_plot_scope = clara_plot_scope
@@ -101,34 +98,56 @@ class KMedoids:
             closest_medoid = min(medoids, key=lambda medoid: self._euclidean_distance(point, medoid))
             clusters[closest_medoid['id']].append(point)
         return clusters
+    
+    # In the KMedoids class:
+
+    def _print_progress_bar(self, iteration, total, prefix='', suffix='', length=50, fill='█'):
+        """
+        Call in a loop to create a terminal progress bar.
+        """
+        percent = ("{0:.1f}").format(100 * (iteration / float(total)))
+        filled_length = int(length * iteration // total)
+        bar = fill * filled_length + '-' * (length - filled_length)
+        # Use carriage return '\r' to stay on the same line.
+        sys.stdout.write(f'\r{prefix} |{bar}| {percent}% {suffix}')
+        sys.stdout.flush()
 
     def _run_pam_swap_phase(self, data_subset, initial_medoids=None, enable_iter_plotting=False, 
                             output_dir=None, plot_prefix='iteration', plotting_data=None):
         """
         Runs the iterative PAM swap phase on a given subset of data.
-        - data_subset: The data to use for cost calculation and finding medoids.
-        - plotting_data: Optional. The data to use for generating visualizations.
-                         If None, data_subset is used.
         """
         current_medoids = initial_medoids if initial_medoids else random.sample(data_subset, self.k)
         data_to_plot = plotting_data if plotting_data is not None else data_subset
 
         if self.verbose and enable_iter_plotting and output_dir:
+            if plot_prefix.startswith('clara'):
+                parts = plot_prefix.split('_')
+                title = f'Initial State (Sample {int(parts[2])})'
+            else:
+                title = 'Initial State (PAM)'
+            
             initial_clusters = self._assign_points_to_clusters(data_to_plot, current_medoids)
             filepath = os.path.join(output_dir, f'{plot_prefix}_000_initial.png')
-            title = f'Initial State ({plot_prefix.split("_")[1]} {plot_prefix.split("_")[2]})'
             save_cluster_plot(initial_clusters, current_medoids, self.k, title, filepath)
 
         for i in range(self.max_iter):
             iter_start_time = time.time()
-            # Cost calculation is ALWAYS based on the data_subset
             best_cost_for_subset = self._calculate_total_cost(data_subset, current_medoids)
             potential_best_medoids = current_medoids[:]
             made_swap = False
 
-            for medoid in current_medoids:
-                non_medoids_in_subset = [p for p in data_subset if p not in current_medoids]
-                for potential_new_medoid in non_medoids_in_subset:
+            # --- Progress Bar Integration ---
+            non_medoids = [p for p in data_subset if p not in current_medoids]
+            total_swaps_to_check = self.k * len(non_medoids)
+            swaps_checked = 0
+            if self.verbose:
+                # Initial display of the progress bar
+                self._print_progress_bar(0, total_swaps_to_check, prefix=f'  - Iteration {i+1} Progress:', length=40)
+            # --- End Integration ---
+
+            for medoid_idx, medoid in enumerate(current_medoids):
+                for non_medoid_idx, potential_new_medoid in enumerate(non_medoids):
                     temp_medoids = [m for m in current_medoids if m != medoid] + [potential_new_medoid]
                     new_cost = self._calculate_total_cost(data_subset, temp_medoids)
                     
@@ -136,17 +155,37 @@ class KMedoids:
                         best_cost_for_subset = new_cost
                         potential_best_medoids = temp_medoids
                         made_swap = True
-            
+                    
+                    # --- Progress Bar Update ---
+                    if self.verbose:
+                        swaps_checked += 1
+                        self._print_progress_bar(swaps_checked, total_swaps_to_check, prefix=f'  - Iteration {i+1} Progress:', length=40)
+                    # --- End Update ---
+
             current_medoids = potential_best_medoids
             iter_runtime = time.time() - iter_start_time
 
             if self.verbose:
-                print(f"  - Iteration {i + 1}: Cost (on subset) = {best_cost_for_subset:.2f}, Swap: {made_swap}, Runtime: {iter_runtime:.4f}s")
+                # Create the summary string
+                summary_line = f"  - Iteration {i + 1}: Cost = {best_cost_for_subset:.2f}, Swap: {made_swap}, Runtime: {iter_runtime:.4f}s"
+                
+                # Pad the string with spaces on the right to ensure it covers the entire progress bar line
+                # 80 characters is a safe width for most terminals.
+                padded_summary = summary_line.ljust(80)
+
+                # Write the padded summary to the same line as the progress bar, then add a newline
+                sys.stdout.write('\r' + padded_summary + '\n')
+                sys.stdout.flush()
+                
                 if enable_iter_plotting and output_dir:
-                    # Plotting is based on plotting_data
+                    if plot_prefix.startswith('clara'):
+                        parts = plot_prefix.split('_')
+                        title = f'Iteration {i+1} (Sample {int(parts[2])})'
+                    else:
+                        title = f'PAM Iteration {i+1}'
+                    
                     clusters_to_plot = self._assign_points_to_clusters(data_to_plot, current_medoids)
                     filepath = os.path.join(output_dir, f'{plot_prefix}_{i+1:03d}.png')
-                    title = f'State after Iteration {i+1} ({plot_prefix.split("_")[1]} {plot_prefix.split("_")[2]})'
                     save_cluster_plot(clusters_to_plot, current_medoids, self.k, title, filepath)
 
             if not made_swap:
@@ -154,6 +193,7 @@ class KMedoids:
                 break
         
         return current_medoids
+
 
     def fit(self, data, output_dir=None):
         if not data or len(data) < self.k:
@@ -169,10 +209,16 @@ class KMedoids:
         if self.swap_phase_method == 'pam':
             if self.verbose: print("\n--- Running Standard PAM Algorithm ---")
             initial_medoids = random.sample(data, self.k)
+
+            if self.verbose:
+                initial_cost = self._calculate_total_cost(data, initial_medoids)
+                print(f"Initial cost with random medoids: {initial_cost:.2f}")
+            
             self.medoids = self._run_pam_swap_phase(data, initial_medoids, enable_iter_plotting=self.verbose, 
                                                     output_dir=output_dir, plot_prefix='pam_iter')
 
         elif self.swap_phase_method == 'clara':
+
             if self.verbose:
                 print(f"\n--- Running CLARA Algorithm ---")
                 print(f"Number of samples: {self.num_samples}, Sample size: {self.sample_size}")
@@ -185,10 +231,8 @@ class KMedoids:
                 sample_data = random.sample(data, self.sample_size)
                 if self.verbose: print(f"\nProcessing Sample {i+1}/{self.num_samples}...")
                 
-                # Determine what data to use for plotting the sub-iterations
                 data_for_plotting = data if self.clara_plot_scope == 'full' else sample_data
                 
-                # Run PAM on the sample, with plotting enabled if verbose is on
                 sample_medoids = self._run_pam_swap_phase(
                     sample_data,
                     enable_iter_plotting=self.verbose,
@@ -262,7 +306,7 @@ def plot_final_clusters(clusters, medoids, k, method_name, output_dir=None):
 
 
 if __name__ == '__main__':
-    file_path = 'smb-dataset.json'
+    file_path = 'dataset.json'
     full_data = load_data_from_json(file_path)
 
     if full_data:
@@ -278,17 +322,14 @@ if __name__ == '__main__':
 
         # --- USER CONFIGURATION ---
         K_CLUSTERS = 3
-        SHOW_LOGS_AND_SAVE_PLOTS = True 
+        SHOW_LOGS_AND_SAVE_PLOTS = True
         
+        # --- Set to 'pam' to test the fix ---
         SWAP_METHOD = 'clara'
 
-        # --- CLARA-specific parameters ---
+        # --- CLARA-specific parameters (these can be left here, they won't affect PAM mode) ---
         NUM_SAMPLES = 3
-        SAMPLE_SIZE = 320
-        
-        # --- NEW: Choose the scope for CLARA's iteration plots ---
-        # 'sample': Shows only the small random sample being processed. (Faster)
-        # 'full':   Shows the entire dataset clustered by the sample's medoids. (More insightful)
+        SAMPLE_SIZE = 4000
         CLARA_PLOT_SCOPE = 'sample'
         
         # --- Create a unique output folder for this run ---

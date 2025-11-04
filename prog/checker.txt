@@ -1,0 +1,57 @@
+import json
+
+# Define the name of the JSON file.
+json_file_name = 'smb-dataset.json'
+
+try:
+    with open(json_file_name, 'r') as file:
+        data = json.load(file)
+except FileNotFoundError:
+    print(f"Error: The file '{json_file_name}' was not found in this directory.")
+    exit()
+except json.JSONDecodeError:
+    print(f"Error: The file '{json_file_name}' is not a valid JSON file.")
+    exit()
+
+# Initialize counters and sets
+house_node_count = 0
+road_node_count = 0
+road_node_ids = set()
+connected_node_ids = set()
+
+# Process nodes
+if 'nodes' in data and isinstance(data['nodes'], list):
+    for node in data['nodes']:
+        if node.get('is_house'):
+            house_node_count += 1
+        else:
+            road_node_count += 1
+            # --- 1. EDIT THIS LINE with your node ID key ---
+            # For example, if your key is 'node_id', change it to str(node['node_id'])
+            road_node_ids.add(str(node['id']))
+
+# Process connections
+if 'connections' in data and isinstance(data['connections'], list):
+    road_connection_count = len(data['connections'])
+    for connection in data['connections']:
+        # --- 2. EDIT THIS LINE with your 'from'/'source' key ---
+        # For example, if your key is 'source_node', change it to str(connection['source_node'])
+        connected_node_ids.add(str(connection['node1_id']))
+
+        # --- 3. EDIT THIS LINE with your 'to'/'target' key ---
+        # For example, if your key is 'target_node', change it to str(connection['target_node'])
+        connected_node_ids.add(str(connection['node2_id']))
+
+# Perform the final calculation
+unconnected_road_node_ids = road_node_ids.difference(connected_node_ids)
+unconnected_road_nodes_count = len(unconnected_road_node_ids)
+
+# Print the results
+print(f"\nSuccessfully loaded data from '{json_file_name}'.")
+print(f"Number of house nodes: {house_node_count}")
+print(f"Number of road nodes: {road_node_count}")
+print(f"Number of road connections: {road_connection_count}")
+print(f"Number of road nodes with no connections: {unconnected_road_nodes_count}")
+
+if unconnected_road_node_ids:
+    print(f"IDs of unconnected road nodes: {list(unconnected_road_node_ids)}")
